@@ -63,13 +63,11 @@ npm run preview
 - `sources`：引用 `sources.ts` 里的 `id` 列表
 - `tips`：给使用者的扫描提示
 
-无需改业务代码；他人 fork 后改 JSON/TS 数据即可适配子方向。
-
 ### 判断清单
 
 编辑 [`src/data/checklists.ts`](src/data/checklists.ts)。勾选进度存在本地机会条目上，不会写回仓库。
 
-## 明确不做（v1）
+## 暂未实现（v1）
 
 - 自动爬取 / RSS 聚合、账号登录、云端同步
 - 完整申请材料与推荐信管理（后续版本可扩展）
