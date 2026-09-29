@@ -3,7 +3,8 @@ import { sources as builtinSources } from '../data/sources'
 import { analyzeSourceWithLlm } from '../lib/llm'
 import { fetchPageText } from '../lib/fetchPageText'
 import { groupSourcesByCountry } from '../lib/groupSources'
-import { slugId } from '../lib/storage'
+import { isUsableSearchTemplate } from '../lib/searchUrl'
+import { slugId, type SourceImportSummary } from '../lib/storage'
 import {
   SOURCE_TYPE_LABELS,
   type LlmSettings,
@@ -28,6 +29,10 @@ interface SourceManagerProps {
   onReset: (id: string) => void
   onPin: (sourceId: string) => void
   onUnpin: (sourceId: string) => void
+  /** Link target for sources in the current recipe (search URL or homepage). */
+  searchUrlFor: (source: Source) => string
+  onExport: () => void
+  onImport: (file: File) => Promise<SourceImportSummary>
   currentSkillId: string
   llm: LlmSettings
   onOpenSettings: () => void
@@ -61,6 +66,9 @@ export function SourceManager({
   onReset,
   onPin,
   onUnpin,
+  searchUrlFor,
+  onExport,
+  onImport,
   currentSkillId,
   llm,
   onOpenSettings,
@@ -74,6 +82,7 @@ export function SourceManager({
   const [analyzing, setAnalyzing] = useState(false)
   const [aiNote, setAiNote] = useState('')
   const [fieldsReady, setFieldsReady] = useState(false)
+  const [importNote, setImportNote] = useState('')
   const formRef = useRef<HTMLFormElement>(null)
 
   const builtinIds = new Set(builtinSources.map((s) => s.id))
@@ -85,6 +94,24 @@ export function SourceManager({
     ...userSources,
   ]
   const isOverridden = (id: string) => customSources.some((c) => c.id === id)
+
+  const importFile = async (file: File) => {
+    setImportNote('')
+    if (showForm) {
+      reset()
+      setShowForm(false)
+    }
+    try {
+      const r = await onImport(file)
+      setImportNote(
+        `导入完成：新增 ${r.added} 个，更新 ${r.updated} 个，未变 ${r.unchanged} 个` +
+          (r.invalid ? `，跳过无效 ${r.invalid} 个` : '') +
+          '。',
+      )
+    } catch (err) {
+      setImportNote(err instanceof Error ? err.message : '导入失败')
+    }
+  }
 
   const reset = () => {
     setForm(emptyForm())
@@ -204,7 +231,9 @@ export function SourceManager({
       howToSearch:
         form.howToSearch.trim() || '打开首页后按关键词搜索 PhD / doctoral。',
       csNotes: form.csNotes.trim() || '用户自定义源',
-      searchUrlTemplate: form.searchUrlTemplate.trim() || undefined,
+      searchUrlTemplate: isUsableSearchTemplate(form.searchUrlTemplate)
+        ? form.searchUrlTemplate.trim()
+        : undefined,
     }
     onSave(source, !editingId && attachToSkill ? currentSkillId : undefined)
     if (editingId && attachToSkill) onPin(source.id)
@@ -228,7 +257,24 @@ export function SourceManager({
         <button type="button" className="btn btn-primary" onClick={startCreate}>
           新增源
         </button>
+        <button type="button" className="btn btn-secondary" onClick={onExport}>
+          导出目录 JSON
+        </button>
+        <label className="btn btn-ghost file-label">
+          导入 JSON
+          <input
+            type="file"
+            accept="application/json,.json"
+            hidden
+            onChange={(e) => {
+              const file = e.target.files?.[0]
+              e.target.value = ''
+              if (file) void importFile(file)
+            }}
+          />
+        </label>
       </div>
+      {importNote && <p className="muted small">{importNote}</p>}
 
       {showForm && (
         <form ref={formRef} className="opp-form" onSubmit={submit}>
@@ -410,7 +456,11 @@ export function SourceManager({
             <ul className="source-catalog">
               {group.sources.map((s) => (
                 <li key={s.id}>
-                  <a href={s.url} target="_blank" rel="noopener noreferrer">
+                  <a
+                    href={skillExtras.includes(s.id) ? searchUrlFor(s) : s.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
                     {s.name}
                   </a>
                   <span className="muted small">

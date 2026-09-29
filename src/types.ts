@@ -35,12 +35,24 @@ export interface ChecklistTemplate {
   items: ChecklistItem[]
 }
 
+/** Application pipeline stage; each stage is a sub-inbox. */
 export type OpportunityStatus =
-  | 'to_review'
-  | 'interested'
-  | 'will_apply'
-  | 'applied'
-  | 'dropped'
+  | 'research'
+  | 'contact'
+  | 'apply'
+  | 'waiting'
+  | 'result'
+
+export type OpportunityOutcome = 'success' | 'failed'
+
+/** position = 岗位制（按岗位课题改 RP）；open = 统招（可用已有 RP） */
+export type OpportunityTrack = 'position' | 'open'
+
+export interface RpFit {
+  /** 1–10; null when there was no RP or not enough information. */
+  score: number | null
+  note: string
+}
 
 /** must = 十分想申；try = 一般可尝试；low = 备选 */
 export type OpportunityPriority = 'must' | 'try' | 'low'
@@ -65,6 +77,11 @@ export interface Opportunity {
   country?: string
   deadline?: string
   status: OpportunityStatus
+  /** Only meaningful when status is 'result'. */
+  outcome?: OpportunityOutcome
+  track?: OpportunityTrack
+  /** How well the user's existing research proposal fits this opportunity. */
+  rpFit?: RpFit
   priority: OpportunityPriority
   tags: string[]
   note: string
@@ -101,6 +118,12 @@ export interface AppSettings {
   cvFileName?: string
   /** Raw extracted CV text kept for re-summarize; not sent on each job analysis. */
   cvText?: string
+  /** User's existing research proposal, used to judge fit when drafting opportunities. */
+  researchProposal?: string
+  researchProposalFileName?: string
+  /** Cached RP summary sent to the LLM instead of the full RP. */
+  researchProposalSummary?: string
+  researchProposalSummarizedAt?: string
 }
 
 export interface LocalState {
@@ -114,12 +137,35 @@ export interface LocalState {
   settings: AppSettings
 }
 
+export const OPPORTUNITY_STATUSES: OpportunityStatus[] = [
+  'research',
+  'contact',
+  'apply',
+  'waiting',
+  'result',
+]
+
 export const OPPORTUNITY_STATUS_LABELS: Record<OpportunityStatus, string> = {
-  to_review: '待看',
-  interested: '感兴趣',
-  will_apply: '想投',
-  applied: '已申请',
-  dropped: '放弃',
+  research: '了解岗位与导师',
+  contact: '套瓷',
+  apply: '网站申请',
+  waiting: '等待面试通知',
+  result: '最终结果',
+}
+
+export const OPPORTUNITY_OUTCOME_LABELS: Record<OpportunityOutcome, string> = {
+  success: '成功',
+  failed: '失败',
+}
+
+export const OPPORTUNITY_TRACK_LABELS: Record<OpportunityTrack, string> = {
+  position: '岗位制',
+  open: '统招',
+}
+
+export const OPPORTUNITY_TRACK_HINTS: Record<OpportunityTrack, string> = {
+  position: '针对岗位课题修改 RP',
+  open: '可用已有 RP',
 }
 
 export const OPPORTUNITY_PRIORITY_LABELS: Record<OpportunityPriority, string> = {

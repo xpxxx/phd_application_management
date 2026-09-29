@@ -3,6 +3,8 @@ import type {
   LlmSettings,
   OpportunityPriority,
   OpportunityStatus,
+  OpportunityTrack,
+  RpFit,
   SourceType,
   YesNoUnclear,
 } from '../types'
@@ -35,6 +37,8 @@ export interface OpportunityDraftFromLlm {
   deadline: string
   priority: OpportunityPriority
   status: OpportunityStatus
+  track: OpportunityTrack | undefined
+  rpFit: RpFit
   tags: string[]
   note: string
   sourceId: string
@@ -203,6 +207,7 @@ export async function draftOpportunityWithLlm(
     url: string
     jobText?: string
     profileSummary?: string
+    researchProposal?: string
     sources: { id: string; name: string; url: string }[]
   },
 ): Promise<OpportunityDraftFromLlm & { fetchedJobText: string; fetchNote: string }> {
@@ -233,19 +238,30 @@ export async function draftOpportunityWithLlm(
   "country": "国家代码如 DE/NL/CH/UK，或空字符串",
   "deadline": "YYYY-MM-DD，若无明确日期则空字符串",
   "priority": "must" | "try" | "low",
-  "status": "to_review",
   "tags": ["短标签，英文或中文，3个以内"],
   "note": "中文备注 2-5 句：课题要点、合同/资助、硬性门槛、值得关注点",
   "sourceId": "若能匹配给定源目录则填其 id，否则空字符串",
+  "track": "position" | "open" | "unclear",
+  "trackReason": "一句中文：判断依据（引用启事里的关键表述）",
+  "rpFitScore": 1到10的整数或 null,
+  "rpFitNote": "中文 2-3 句：申请者已有 RP 与本机会的契合点、缺口，以及 RP 需要怎样调整",
   "notesForUser": "一句中文：哪些字段是推测、建议核对什么"
 }
-priority：must=十分契合且值得优先；try=可尝试；low=备选/匹配弱。可参考申请者背景摘要，但不要编造启事中没有的硬性信息。
-status 固定建议 to_review。deadline 必须是真实可解析日期或空。`
+priority：must=十分契合且值得优先；try=可尝试；low=备选/匹配弱。可参考申请者背景摘要和 RP，但不要编造启事中没有的硬性信息。
+deadline 必须是真实可解析日期或空。
+track 判断：
+- position（岗位制）：启事给定了具体课题/项目/导师，经费绑定该项目（如 funded project、MSCA DN 某个 DC 岗、"the PhD candidate will work on …"）。申请者需要围绕岗位课题重写或修改 RP。
+- open（统招）：研究生院、博士项目或学院的统一招生（如 graduate school / doctoral programme open call、ELLIS、IMPRS 的年度招生，或要求"submit your own research proposal"），方向较宽，可以直接用申请者已有的 RP。
+- 信息不足以判断时填 unclear。
+rpFitScore：申请者已有 RP 与本机会课题/方向的契合度，10=几乎可以原样使用，1=几乎无关。未提供 RP 时填 null，rpFitNote 注明"未提供 RP"。`
 
   const user = `岗位链接：${input.url.trim()}
 
 申请者背景摘要（仅供建议优先级，可忽略）：
 ${input.profileSummary?.trim() || '（无）'}
+
+申请者已有研究计划（RP）的摘要或节选（用于判断 rpFitScore）：
+${input.researchProposal?.trim().slice(0, 8000) || '（未提供）'}
 
 可选来源目录（匹配 sourceId 用）：
 ${sourceLines || '（无）'}
@@ -276,6 +292,16 @@ ${jobText.slice(0, 24000)}`
     deadline = ''
   }
   const sourceId = String(parsed.sourceId ?? '').trim()
+  const track =
+    parsed.track === 'position' || parsed.track === 'open'
+      ? parsed.track
+      : undefined
+  const fitRaw = parsed.rpFitScore
+  const rpFitScore =
+    typeof fitRaw === 'number' && Number.isFinite(fitRaw)
+      ? Math.max(1, Math.min(10, Math.round(fitRaw)))
+      : null
+  const trackReason = String(parsed.trackReason ?? '').trim()
   const known = new Set(input.sources.map((s) => s.id))
 
   return {
@@ -283,7 +309,17 @@ ${jobText.slice(0, 24000)}`
     country: String(parsed.country ?? '').trim(),
     deadline,
     priority,
-    status: 'to_review',
+    status: 'research',
+    track,
+    rpFit: {
+      score: rpFitScore,
+      note: [
+        trackReason && `类型判断：${trackReason}`,
+        String(parsed.rpFitNote ?? '').trim(),
+      ]
+        .filter(Boolean)
+        .join('\n'),
+    },
     tags,
     note: String(parsed.note ?? '').trim(),
     sourceId: known.has(sourceId) ? sourceId : '',
@@ -319,6 +355,32 @@ export async function summarizeCvWithLlm(
         role: 'user',
         content: `CV 文本：\n${cvText.trim().slice(0, 60000)}`,
       },
+    ],
+    { temperature: 0.3 },
+  )
+  return content.trim()
+}
+
+/** One-time (or on RP update) summary — result should be cached in settings. */
+export async function summarizeRpWithLlm(
+  settings: LlmSettings,
+  rpText: string,
+): Promise<string> {
+  if (!rpText.trim()) throw new Error('RP 文本为空')
+
+  const system = `你是欧洲 CS 博士申请顾问。根据申请人的研究计划（RP），用中文写一份结构化摘要，供后续判断「RP 与各博士机会的契合度」反复使用。
+要求：
+- 300–500 字为宜，信息密度高，不要空话
+- 覆盖：研究问题与动机、核心方法/技术路线、应用场景或数据、预期贡献、关键词（中英文各 5-10 个）、可延展的相邻方向
+- 保留专有名词、方法名、领域术语的英文原文
+- 不要编造 RP 中没有的信息
+- 直接输出摘要正文，不要寒暄，不要 JSON`
+
+  const content = await chatCompletion(
+    settings,
+    [
+      { role: 'system', content: system },
+      { role: 'user', content: `RP 文本：\n${rpText.trim().slice(0, 40000)}` },
     ],
     { temperature: 0.3 },
   )

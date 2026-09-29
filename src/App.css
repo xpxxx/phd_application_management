@@ -340,10 +340,10 @@ main {
 }
 
 .source-list > li {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
   gap: 1rem;
-  justify-content: space-between;
   padding: 1rem;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -387,7 +387,27 @@ main {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
-  min-width: 140px;
+  width: 140px;
+}
+
+.source-title-row h3 a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.source-title-row h3 a:hover {
+  color: var(--accent-text);
+  text-decoration: underline;
+}
+
+@media (max-width: 639px) {
+  .source-list > li {
+    grid-template-columns: 1fr;
+  }
+
+  .source-actions {
+    width: auto;
+  }
 }
 
 .check-inline {
@@ -673,27 +693,169 @@ main {
   border-radius: 999px;
 }
 
-.status-to_review {
+.status-research {
   background: var(--neutral-soft);
   color: var(--muted);
 }
 
-.status-interested {
+.status-contact {
   background: var(--warn-soft);
   color: var(--warn);
 }
 
-.status-will_apply {
+.status-apply {
   background: var(--accent-soft);
   color: var(--accent-text);
 }
 
-.status-applied {
+.status-waiting {
   background: var(--info-soft);
   color: var(--info);
 }
 
-.status-dropped {
+.status-result.status-success {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.status-result.status-failed {
   background: var(--danger-soft);
   color: var(--danger);
+}
+
+.ddl {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.ddl-urgent,
+.ddl-past {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.ddl-past {
+  opacity: 0.75;
+}
+
+.ddl-soon {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.ddl-later {
+  background: var(--neutral-soft);
+  color: var(--muted);
+}
+
+.stage-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.85rem;
+}
+
+.stage-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg1);
+  color: var(--muted);
+  font-size: 0.85rem;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.stage-tab:hover {
+  border-color: var(--accent-dim);
+}
+
+.stage-tab.active {
+  background: var(--accent-soft);
+  border-color: var(--accent-dim);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.stage-tab-count {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: var(--bg2);
+}
+
+.track-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: -0.25rem 0 0.85rem;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--accent-soft);
+}
+
+.track-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg1);
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.track-tab.active {
+  background: var(--warn-soft);
+  border-color: var(--warn);
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.track,
+.rp-fit {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.track-position {
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+.track-open {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.rp-fit {
+  background: var(--neutral-soft);
+  color: var(--text);
+}
+
+.rp-fit-note {
+  white-space: pre-wrap;
+  padding: 0.4rem 0.6rem;
+  border-radius: 8px;
+  background: var(--bg2);
+  color: var(--muted);
+}
+
+.move-select {
+  background: var(--bg1);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.8rem;
+  color: var(--text);
+  max-width: 11rem;
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { extractCvText } from '../lib/cvText'
-import { summarizeCvWithLlm } from '../lib/llm'
+import { summarizeCvWithLlm, summarizeRpWithLlm } from '../lib/llm'
 import { DEFAULT_LLM_SETTINGS, type AppSettings } from '../types'
 
 interface SettingsPanelProps {
@@ -15,9 +15,15 @@ export function SettingsPanel({ settings, onSave }: SettingsPanelProps) {
   const [summarizing, setSummarizing] = useState(false)
   const [error, setError] = useState('')
   const [pendingSummary, setPendingSummary] = useState(false)
+  const [rpText, setRpText] = useState(settings.researchProposal ?? '')
+  const [rpSaved, setRpSaved] = useState(false)
+  const [rpUploading, setRpUploading] = useState(false)
+  const [rpError, setRpError] = useState('')
+  const [rpSummarizing, setRpSummarizing] = useState(false)
 
   useEffect(() => {
     setForm(settings)
+    setRpText(settings.researchProposal ?? '')
   }, [settings])
 
   const persist = (next: AppSettings, opts?: { toast?: boolean }) => {
@@ -96,6 +102,68 @@ export function SettingsPanel({ settings, onSave }: SettingsPanelProps) {
       setError(err instanceof Error ? err.message : '总结失败')
     } finally {
       setSummarizing(false)
+    }
+  }
+
+  const saveRp = (text: string, fileName?: string): AppSettings => {
+    const changed = text.trim() !== (form.researchProposal ?? '')
+    const next: AppSettings = {
+      ...form,
+      researchProposal: text.trim() || undefined,
+      researchProposalFileName: text.trim() ? fileName : undefined,
+      ...(changed && {
+        researchProposalSummary: undefined,
+        researchProposalSummarizedAt: undefined,
+      }),
+    }
+    persist(next, { toast: false })
+    setRpSaved(true)
+    window.setTimeout(() => setRpSaved(false), 2000)
+    return next
+  }
+
+  const runRpSummarize = async () => {
+    setRpError('')
+    if (!rpText.trim()) {
+      setRpError('请先粘贴或上传 RP')
+      return
+    }
+    if (!form.llm.apiKey.trim()) {
+      setRpError('请先填写并保存 API Key')
+      return
+    }
+    const base =
+      rpText.trim() === (form.researchProposal ?? '')
+        ? form
+        : saveRp(rpText, form.researchProposalFileName)
+    setRpSummarizing(true)
+    try {
+      const summary = await summarizeRpWithLlm(base.llm, rpText)
+      persist({
+        ...base,
+        researchProposalSummary: summary,
+        researchProposalSummarizedAt: new Date().toISOString(),
+      })
+    } catch (err) {
+      setRpError(err instanceof Error ? err.message : 'RP 总结失败')
+    } finally {
+      setRpSummarizing(false)
+    }
+  }
+
+  const onRpFile = async (file: File | undefined) => {
+    if (!file) return
+    setRpError('')
+    setRpUploading(true)
+    try {
+      const text = await extractCvText(file)
+      if (!text.trim()) throw new Error('未能从文件中提取到文本')
+      setRpText(text)
+      saveRp(text, file.name)
+    } catch (err) {
+      setRpError(err instanceof Error ? err.message : '读取 RP 失败')
+    } finally {
+      setRpUploading(false)
     }
   }
 
@@ -274,6 +342,111 @@ export function SettingsPanel({ settings, onSave }: SettingsPanelProps) {
           <p className="empty" style={{ padding: '1rem 0' }}>
             尚无摘要。上传 CV 并生成后，收件箱的 AI 分析将自动使用它。
           </p>
+        )}
+      </div>
+
+      <div className="opp-form">
+        <h3>我的研究计划（RP）</h3>
+        <p className="muted small">
+          保存后点「生成 RP 摘要」，大模型总结一次并缓存。收件箱「AI 拟稿」只带上这份摘要，
+          用来判断机会是岗位制还是统招以及 RP 契合度，不会每次都发送完整 RP。修改 RP
+          后需重新生成。仅存本机。
+        </p>
+        <div className="btn-row" style={{ marginBottom: '0.75rem' }}>
+          <label className="btn btn-secondary file-label">
+            {rpUploading ? '读取中…' : '上传 RP 文件'}
+            <input
+              type="file"
+              accept=".pdf,.txt,.md,application/pdf,text/plain,text/markdown"
+              hidden
+              disabled={rpUploading}
+              onChange={(e) => {
+                void onRpFile(e.target.files?.[0])
+                e.target.value = ''
+              }}
+            />
+          </label>
+          {form.researchProposalFileName && (
+            <span className="muted small">
+              来自文件：{form.researchProposalFileName}
+            </span>
+          )}
+        </div>
+        {rpError && <p className="error">{rpError}</p>}
+        <label className="full">
+          <textarea
+            rows={8}
+            value={rpText}
+            onChange={(e) => setRpText(e.target.value)}
+            placeholder="粘贴 RP 正文，或上传 PDF / TXT / MD…"
+          />
+        </label>
+        <div className="btn-row" style={{ marginTop: '0.75rem' }}>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={rpText === (settings.researchProposal ?? '')}
+            onClick={() => saveRp(rpText, form.researchProposalFileName)}
+          >
+            保存 RP
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={rpSummarizing || !rpText.trim()}
+            onClick={() => void runRpSummarize()}
+          >
+            {rpSummarizing
+              ? '总结中…'
+              : form.researchProposalSummary
+                ? '重新生成 RP 摘要（覆盖）'
+                : '生成 RP 摘要'}
+          </button>
+          {rpText && (
+            <button
+              type="button"
+              className="btn btn-ghost danger"
+              onClick={() => {
+                if (!confirm('清除已保存的 RP？')) return
+                setRpText('')
+                saveRp('')
+              }}
+            >
+              清除 RP
+            </button>
+          )}
+          {rpSaved && <span className="muted small">已保存到本机</span>}
+          {rpText && (
+            <span className="muted small">约 {rpText.length.toLocaleString()} 字</span>
+          )}
+        </div>
+        {form.researchProposalSummary ? (
+          <div
+            className="analysis-result"
+            style={{ borderTop: 'none', marginTop: '0.75rem', paddingTop: 0 }}
+          >
+            <h4>
+              已缓存的 RP 摘要
+              {form.researchProposalSummarizedAt && (
+                <span
+                  className="muted small"
+                  style={{ fontWeight: 400, marginLeft: '0.5rem' }}
+                >
+                  {new Date(form.researchProposalSummarizedAt).toLocaleString()}
+                </span>
+              )}
+            </h4>
+            <p style={{ whiteSpace: 'pre-wrap' }}>
+              {form.researchProposalSummary}
+            </p>
+          </div>
+        ) : (
+          form.researchProposal && (
+            <p className="error" style={{ color: 'var(--warn)' }}>
+              尚未生成 RP 摘要。在生成之前，AI 拟稿会直接发送 RP 原文（前约 8000
+              字），更耗 token。
+            </p>
+          )
         )}
       </div>
     </section>

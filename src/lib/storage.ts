@@ -7,7 +7,7 @@ import type {
   Skill,
   Source,
 } from '../types'
-import { DEFAULT_SETTINGS } from '../types'
+import { DEFAULT_SETTINGS, OPPORTUNITY_STATUSES } from '../types'
 import { sources as builtinSources } from '../data/sources'
 
 const STORAGE_KEY = 'phd-discovery-local-v1'
@@ -22,12 +22,30 @@ const defaultState = (): LocalState => ({
   settings: structuredClone(DEFAULT_SETTINGS),
 })
 
+const LEGACY_STATUS: Record<string, Pick<Opportunity, 'status' | 'outcome'>> = {
+  to_review: { status: 'research' },
+  interested: { status: 'research' },
+  will_apply: { status: 'apply' },
+  applied: { status: 'waiting' },
+  dropped: { status: 'result', outcome: 'failed' },
+}
+
 function normalizeOpportunity(raw: Opportunity): Opportunity {
   const priority: OpportunityPriority =
     raw.priority === 'must' || raw.priority === 'try' || raw.priority === 'low'
       ? raw.priority
       : 'try'
-  return { ...raw, priority }
+  const stage = OPPORTUNITY_STATUSES.includes(raw.status)
+    ? { status: raw.status, outcome: raw.outcome }
+    : (LEGACY_STATUS[raw.status as string] ?? { status: 'research' as const })
+  return {
+    ...raw,
+    priority,
+    status: stage.status,
+    outcome: stage.status === 'result' ? (stage.outcome ?? 'failed') : undefined,
+    track:
+      raw.track === 'position' || raw.track === 'open' ? raw.track : undefined,
+  }
 }
 
 function migrateLlmSettings(llm: AppSettings['llm']): AppSettings['llm'] {
@@ -296,6 +314,160 @@ export function removeCustomSource(state: LocalState, id: string): LocalState {
     customSources: state.customSources.filter((s) => s.id !== id),
     skillSourceExtras,
   }
+}
+
+const SOURCE_EXPORT_KIND = 'phd-scout-sources'
+
+/** Built-in sources with local edits applied, followed by user-added sources. */
+export function effectiveSources(state: LocalState): Source[] {
+  const builtinIds = new Set(builtinSources.map((s) => s.id))
+  return [
+    ...builtinSources.map(
+      (b) => state.customSources.find((c) => c.id === b.id) ?? b,
+    ),
+    ...state.customSources.filter((c) => !builtinIds.has(c.id)),
+  ]
+}
+
+export function exportSourceCatalog(state: LocalState): string {
+  return JSON.stringify(
+    {
+      kind: SOURCE_EXPORT_KIND,
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      sources: effectiveSources(state),
+    },
+    null,
+    2,
+  )
+}
+
+const SOURCE_TYPE_SET = new Set<Source['type']>([
+  'aggregator',
+  'national',
+  'project',
+  'university',
+  'other',
+])
+
+function parseSource(raw: unknown): Source | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const name = String(r.name ?? '').trim()
+  const url = String(r.url ?? '').trim()
+  if (!name || !url) return null
+  try {
+    new URL(url)
+  } catch {
+    return null
+  }
+  const countries = Array.isArray(r.countries)
+    ? r.countries.map((c) => String(c).trim()).filter(Boolean)
+    : []
+  const template = String(r.searchUrlTemplate ?? '').trim()
+  return {
+    id: String(r.id ?? '').trim(),
+    name,
+    url,
+    countries,
+    type: SOURCE_TYPE_SET.has(r.type as Source['type'])
+      ? (r.type as Source['type'])
+      : 'other',
+    howToSearch: String(r.howToSearch ?? '').trim(),
+    csNotes: String(r.csNotes ?? '').trim(),
+    searchUrlTemplate: template || undefined,
+  }
+}
+
+/** Imported fields win; empty ones fall back to the matched source or defaults. */
+function completeSource(incoming: Source, match: Source | undefined): Source {
+  return {
+    id: match?.id ?? (incoming.id || slugId(incoming.name)),
+    name: incoming.name,
+    url: incoming.url,
+    countries: incoming.countries.length
+      ? incoming.countries
+      : (match?.countries ?? ['Europe']),
+    type:
+      incoming.type === 'other' && match ? match.type : incoming.type,
+    howToSearch:
+      incoming.howToSearch ||
+      match?.howToSearch ||
+      '打开首页后按关键词搜索 PhD / doctoral。',
+    csNotes: incoming.csNotes || match?.csNotes || '导入的源',
+    searchUrlTemplate: incoming.searchUrlTemplate ?? match?.searchUrlTemplate,
+  }
+}
+
+const sameSource = (a: Source, b: Source) =>
+  JSON.stringify({ ...a, searchUrlTemplate: a.searchUrlTemplate ?? '' }) ===
+  JSON.stringify({ ...b, searchUrlTemplate: b.searchUrlTemplate ?? '' })
+
+export interface SourceImportSummary {
+  added: number
+  updated: number
+  unchanged: number
+  invalid: number
+}
+
+/**
+ * Merge a source-catalog JSON into local state. Accepts this app's catalog
+ * export, a full inbox backup (customSources), or a bare array of sources.
+ * Same id or same URL counts as the same source and is overwritten.
+ */
+export function mergeImportedSources(
+  state: LocalState,
+  text: string,
+): { state: LocalState; summary: SourceImportSummary } {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error('不是有效的 JSON 文件')
+  }
+  const obj = parsed as Record<string, unknown> | null
+  const list = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(obj?.sources)
+      ? obj.sources
+      : Array.isArray(obj?.customSources)
+        ? obj.customSources
+        : null
+  if (!list) {
+    throw new Error('未找到检索源：需要 sources 数组（或 customSources / 源数组）')
+  }
+
+  const summary: SourceImportSummary = {
+    added: 0,
+    updated: 0,
+    unchanged: 0,
+    invalid: 0,
+  }
+  let next = state
+  for (const raw of list) {
+    const incoming = parseSource(raw)
+    if (!incoming) {
+      summary.invalid += 1
+      continue
+    }
+    const current = effectiveSources(next)
+    const match =
+      (incoming.id && current.find((s) => s.id === incoming.id)) ||
+      current.find((s) => normalizeUrl(s.url) === normalizeUrl(incoming.url))
+    const source = completeSource(incoming, match || undefined)
+    if (match && sameSource(match, source)) {
+      summary.unchanged += 1
+      continue
+    }
+    const builtin = builtinSources.find((b) => b.id === source.id)
+    next =
+      builtin && sameSource(builtin, source)
+        ? removeSourceOverride(next, source.id)
+        : upsertCustomSource(next, source)
+    if (match) summary.updated += 1
+    else summary.added += 1
+  }
+  return { state: next, summary }
 }
 
 /** Drop a local edit of a built-in source; recipe references stay intact. */

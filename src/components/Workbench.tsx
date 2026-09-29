@@ -5,6 +5,7 @@ import { SourceManager } from './SourceManager'
 import { SOURCE_TYPE_LABELS, type LlmSettings, type Skill, type Source } from '../types'
 import { buildSearchUrl, queryPreview } from '../lib/searchUrl'
 import { groupSourcesByCountry } from '../lib/groupSources'
+import type { SourceImportSummary } from '../lib/storage'
 
 interface WorkbenchProps {
   skills: Skill[]
@@ -25,6 +26,8 @@ interface WorkbenchProps {
   onDeleteSource: (id: string) => void
   onResetSource: (id: string) => void
   onPinSource: (sourceId: string) => void
+  onExportSources: () => void
+  onImportSources: (file: File) => Promise<SourceImportSummary>
   llm: LlmSettings
   onOpenSettings: () => void
 }
@@ -64,6 +67,8 @@ export function Workbench({
   onDeleteSource,
   onResetSource,
   onPinSource,
+  onExportSources,
+  onImportSources,
   llm,
   onOpenSettings,
 }: WorkbenchProps) {
@@ -247,7 +252,18 @@ export function Workbench({
                 <li key={source.id} className={scanned ? 'scanned' : ''}>
                   <div className="source-main">
                     <div className="source-title-row">
-                      <h3>{source.name}</h3>
+                      <h3>
+                        <a
+                          href={searchUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={() => {
+                            if (!scanned) onToggleScanned(source.id)
+                          }}
+                        >
+                          {source.name}
+                        </a>
+                      </h3>
                       <span className="badge">{SOURCE_TYPE_LABELS[source.type]}</span>
                       {isBuiltin && isLocal && (
                         <span className="badge">已修改</span>
@@ -312,6 +328,9 @@ export function Workbench({
         onReset={onResetSource}
         onPin={onPinSource}
         onUnpin={removeFromSkill}
+        searchUrlFor={(s) => buildSearchUrl(s, skill)}
+        onExport={onExportSources}
+        onImport={onImportSources}
         llm={llm}
         onOpenSettings={onOpenSettings}
       />

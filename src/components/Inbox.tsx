@@ -11,14 +11,20 @@ import { checklists } from '../data/checklists'
 import { draftOpportunityWithLlm } from '../lib/llm'
 import { AnalyzeModal } from './AnalyzeModal'
 import {
+  OPPORTUNITY_OUTCOME_LABELS,
   OPPORTUNITY_PRIORITY_LABELS,
+  OPPORTUNITY_STATUSES,
   OPPORTUNITY_STATUS_LABELS,
+  OPPORTUNITY_TRACK_HINTS,
+  OPPORTUNITY_TRACK_LABELS,
   PRIORITY_ORDER,
   YES_NO_UNCLEAR_LABELS,
   type AppSettings,
   type Opportunity,
+  type OpportunityOutcome,
   type OpportunityPriority,
   type OpportunityStatus,
+  type OpportunityTrack,
   type Source,
 } from '../types'
 import { findDuplicate, newId } from '../lib/storage'
@@ -38,13 +44,62 @@ interface InboxProps {
   leaveGuardRef?: MutableRefObject<((action: () => void) => void) | null>
 }
 
-const STATUSES: OpportunityStatus[] = [
-  'to_review',
-  'interested',
-  'will_apply',
-  'applied',
-  'dropped',
+/** Whole days from today (local time) until an ISO date; negative if past. */
+function daysUntil(deadline: string): number {
+  const [y, m, d] = deadline.split('-').map(Number)
+  const today = new Date()
+  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+  return Math.round((new Date(y, m - 1, d).getTime() - start.getTime()) / 86400000)
+}
+
+function ddlText(days: number): string {
+  if (days < 0) return `已过期 ${-days} 天`
+  if (days === 0) return '今天截止'
+  return `距 DDL ${days} 天`
+}
+
+function ddlLevel(days: number): 'past' | 'urgent' | 'soon' | 'later' {
+  if (days < 0) return 'past'
+  if (days <= 3) return 'urgent'
+  if (days <= 14) return 'soon'
+  return 'later'
+}
+
+/** Stages whose sub-inbox shows deadline countdowns and sorts by deadline. */
+const DDL_STAGES: OpportunityStatus[] = ['research', 'contact', 'apply']
+
+const TRACKS: OpportunityTrack[] = ['position', 'open']
+
+type TrackFilter = OpportunityTrack | 'none' | 'all'
+
+/** Value of the "move to" select: a stage, or result with its outcome. */
+type MoveTarget = Exclude<OpportunityStatus, 'result'> | `result:${OpportunityOutcome}`
+
+const moveTargetOf = (o: Pick<Opportunity, 'status' | 'outcome'>): MoveTarget =>
+  o.status === 'result' ? `result:${o.outcome ?? 'failed'}` : o.status
+
+const stageFromTarget = (
+  target: MoveTarget,
+): Pick<Opportunity, 'status' | 'outcome'> =>
+  target.startsWith('result:')
+    ? { status: 'result', outcome: target.slice(7) as OpportunityOutcome }
+    : { status: target as OpportunityStatus, outcome: undefined }
+
+const MOVE_TARGETS: MoveTarget[] = [
+  'research',
+  'contact',
+  'apply',
+  'waiting',
+  'result:success',
+  'result:failed',
 ]
+
+const moveTargetLabel = (t: MoveTarget) => {
+  const { status, outcome } = stageFromTarget(t)
+  return outcome
+    ? `${OPPORTUNITY_STATUS_LABELS[status]} · ${OPPORTUNITY_OUTCOME_LABELS[outcome]}`
+    : OPPORTUNITY_STATUS_LABELS[status]
+}
 
 const PRIORITIES: OpportunityPriority[] = ['must', 'try', 'low']
 
@@ -54,7 +109,7 @@ const emptyForm = (): Omit<Opportunity, 'id' | 'createdAt' | 'updatedAt'> => ({
   sourceId: '',
   country: '',
   deadline: '',
-  status: 'to_review',
+  status: 'research',
   priority: 'try',
   tags: [],
   note: '',
@@ -75,13 +130,14 @@ export function Inbox({
   leaveGuardRef,
 }: InboxProps) {
   const [query, setQuery] = useState('')
-  const [statusFilter, setStatusFilter] = useState<OpportunityStatus | 'all'>(
+  const [stageFilter, setStageFilter] = useState<OpportunityStatus | 'all'>(
     'all',
   )
   const [priorityFilter, setPriorityFilter] = useState<
     OpportunityPriority | 'all'
   >('all')
   const [countryFilter, setCountryFilter] = useState('')
+  const [trackFilter, setTrackFilter] = useState<TrackFilter>('all')
   const [editing, setEditing] = useState<Opportunity | null>(null)
   const [form, setForm] = useState(emptyForm())
   const [tagInput, setTagInput] = useState('')
@@ -176,7 +232,10 @@ export function Inbox({
     return opportunities
       .filter((o) => {
         if (editing && o.id === editing.id) return true
-        if (statusFilter !== 'all' && o.status !== statusFilter) return false
+        if (stageFilter !== 'all' && o.status !== stageFilter) return false
+        if (stageFilter === 'contact' && trackFilter !== 'all') {
+          if ((o.track ?? 'none') !== trackFilter) return false
+        }
         if (priorityFilter !== 'all' && o.priority !== priorityFilter)
           return false
         if (countryFilter && o.country !== countryFilter) return false
@@ -191,24 +250,87 @@ export function Inbox({
         )
       })
       .sort((a, b) => {
+        if (stageFilter !== 'all' && DDL_STAGES.includes(stageFilter)) {
+          const dd = (a.deadline || '9999').localeCompare(b.deadline || '9999')
+          if (dd !== 0) return dd
+        }
         const pd =
           PRIORITY_ORDER[a.priority ?? 'try'] -
           PRIORITY_ORDER[b.priority ?? 'try']
         if (pd !== 0) return pd
         return (a.deadline || '9999').localeCompare(b.deadline || '9999')
       })
-  }, [opportunities, query, statusFilter, priorityFilter, countryFilter, editing])
+  }, [
+    opportunities,
+    query,
+    stageFilter,
+    trackFilter,
+    priorityFilter,
+    countryFilter,
+    editing,
+  ])
+
+  const stageCounts = useMemo(() => {
+    const counts = Object.fromEntries(
+      OPPORTUNITY_STATUSES.map((st) => [st, 0]),
+    ) as Record<OpportunityStatus, number>
+    for (const o of opportunities) counts[o.status] += 1
+    return counts
+  }, [opportunities])
+
+  /** Nearest not-yet-passed deadline per stage. */
+  const nearestDdl = useMemo(() => {
+    const out: Partial<Record<OpportunityStatus, number>> = {}
+    for (const o of opportunities) {
+      if (!o.deadline) continue
+      const d = daysUntil(o.deadline)
+      if (d < 0) continue
+      const prev = out[o.status]
+      if (prev === undefined || d < prev) out[o.status] = d
+    }
+    return out
+  }, [opportunities])
+
+  const trackCounts = useMemo(() => {
+    const counts: Record<TrackFilter, number> = {
+      all: 0,
+      position: 0,
+      open: 0,
+      none: 0,
+    }
+    for (const o of opportunities) {
+      if (o.status !== 'contact') continue
+      counts.all += 1
+      counts[o.track ?? 'none'] += 1
+    }
+    return counts
+  }, [opportunities])
+
+  const moveOpportunity = (opp: Opportunity, target: MoveTarget) => {
+    onSave({
+      ...opp,
+      ...stageFromTarget(target),
+      updatedAt: new Date().toISOString(),
+    })
+  }
 
   const openCreate = () => {
+    const next = {
+      ...emptyForm(),
+      ...(stageFilter !== 'all' && {
+        status: stageFilter,
+        outcome: stageFilter === 'result' ? ('failed' as const) : undefined,
+      }),
+    }
     setEditing(null)
-    setForm(emptyForm())
+    setForm(next)
     setTagInput('')
     setJobDraftText('')
     setAiNote('')
     setFieldsReady(false)
     setError('')
     setShowForm(true)
-    setSnapshot(formSnapshot(emptyForm(), '', ''))
+    setSnapshot(formSnapshot(next, '', ''))
     requestAnimationFrame(() =>
       createFormRef.current?.scrollIntoView({
         behavior: 'smooth',
@@ -225,6 +347,9 @@ export function Inbox({
       country: opp.country ?? '',
       deadline: opp.deadline ?? '',
       status: opp.status,
+      outcome: opp.outcome,
+      track: opp.track,
+      rpFit: opp.rpFit,
       priority: opp.priority ?? 'try',
       tags: opp.tags,
       note: opp.note,
@@ -267,6 +392,8 @@ export function Inbox({
         jobText: jobDraftText,
         profileSummary:
           settings.profileSummary.trim() || settings.profile.trim(),
+        researchProposal:
+          settings.researchProposalSummary || settings.researchProposal,
         sources: allSources.map((s) => ({
           id: s.id,
           name: s.name,
@@ -282,10 +409,11 @@ export function Inbox({
         country: draft.country,
         deadline: draft.deadline,
         priority: draft.priority,
-        status: draft.status,
         note: draft.note,
         sourceId: draft.sourceId || prev.sourceId,
         tags: draft.tags,
+        track: draft.track ?? prev.track,
+        rpFit: draft.rpFit,
       }))
       setTagInput(draft.tags.join(', '))
       setAiNote(draft.notesForUser)
@@ -317,6 +445,12 @@ export function Inbox({
       country: (form.country ?? '').trim() || undefined,
       deadline: form.deadline || undefined,
       status: form.status,
+      outcome: form.status === 'result' ? (form.outcome ?? 'failed') : undefined,
+      track: form.track,
+      rpFit:
+        form.rpFit && (form.rpFit.score != null || form.rpFit.note.trim())
+          ? { score: form.rpFit.score, note: form.rpFit.note.trim() }
+          : undefined,
       priority: form.priority,
       tags,
       note: form.note.trim(),
@@ -482,22 +616,86 @@ export function Inbox({
               />
             </label>
             <label>
-              状态
+              阶段
               <select
-                value={form.status}
+                value={moveTargetOf(form)}
                 onChange={(e) =>
                   setForm({
                     ...form,
-                    status: e.target.value as OpportunityStatus,
+                    ...stageFromTarget(e.target.value as MoveTarget),
                   })
                 }
               >
-                {STATUSES.map((s) => (
-                  <option key={s} value={s}>
-                    {OPPORTUNITY_STATUS_LABELS[s]}
+                {MOVE_TARGETS.map((t) => (
+                  <option key={t} value={t}>
+                    {moveTargetLabel(t)}
                   </option>
                 ))}
               </select>
+            </label>
+            <label>
+              招生类型
+              <select
+                value={form.track ?? ''}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    track: (e.target.value || undefined) as
+                      | OpportunityTrack
+                      | undefined,
+                  })
+                }
+              >
+                <option value="">未判断</option>
+                {TRACKS.map((t) => (
+                  <option key={t} value={t}>
+                    {OPPORTUNITY_TRACK_LABELS[t]}（{OPPORTUNITY_TRACK_HINTS[t]}）
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              RP 契合度
+              <select
+                value={form.rpFit?.score ?? ''}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    rpFit: {
+                      note: form.rpFit?.note ?? '',
+                      score: e.target.value ? Number(e.target.value) : null,
+                    },
+                  })
+                }
+              >
+                <option value="">未评估</option>
+                {Array.from({ length: 10 }, (_, i) => 10 - i).map((n) => (
+                  <option key={n} value={n}>
+                    {n} / 10
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="full">
+              RP 契合说明
+              <textarea
+                rows={2}
+                value={form.rpFit?.note ?? ''}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    rpFit: {
+                      score: form.rpFit?.score ?? null,
+                      note: e.target.value,
+                    },
+                  })
+                }
+                placeholder={
+                  settings.researchProposal
+                    ? 'AI 拟稿会自动填写；也可手动记录 RP 需要怎么改'
+                    : '在「设置」里保存 RP 后，AI 拟稿会自动评估契合度'
+                }
+              />
             </label>
             <label className="full">
               标签（逗号分隔）
@@ -605,7 +803,30 @@ export function Inbox({
         </div>
       </header>
 
-      <div className="filters filters-4">
+      <nav className="stage-tabs" aria-label="子收件箱">
+        {(['all', ...OPPORTUNITY_STATUSES] as const).map((st, i) => (
+          <button
+            key={st}
+            type="button"
+            className={stageFilter === st ? 'stage-tab active' : 'stage-tab'}
+            onClick={() => setStageFilter(st)}
+          >
+            <span className="stage-tab-name">
+              {st === 'all' ? '全部' : `${i}. ${OPPORTUNITY_STATUS_LABELS[st]}`}
+            </span>
+            <span className="stage-tab-count">
+              {st === 'all' ? opportunities.length : stageCounts[st]}
+            </span>
+            {st !== 'all' && nearestDdl[st] !== undefined && (
+              <span className={`ddl ddl-${ddlLevel(nearestDdl[st])}`}>
+                最近 {ddlText(nearestDdl[st])}
+              </span>
+            )}
+          </button>
+        ))}
+      </nav>
+
+      <div className="filters">
         <input
           type="search"
           placeholder="搜索标题、链接、标签、备注…"
@@ -626,19 +847,6 @@ export function Inbox({
           ))}
         </select>
         <select
-          value={statusFilter}
-          onChange={(e) =>
-            setStatusFilter(e.target.value as OpportunityStatus | 'all')
-          }
-        >
-          <option value="all">全部状态</option>
-          {STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {OPPORTUNITY_STATUS_LABELS[s]}
-            </option>
-          ))}
-        </select>
-        <select
           value={countryFilter}
           onChange={(e) => setCountryFilter(e.target.value)}
         >
@@ -651,13 +859,38 @@ export function Inbox({
         </select>
       </div>
 
+      {stageFilter === 'contact' && (
+        <div className="track-tabs" role="group" aria-label="招生类型">
+          {(['all', ...TRACKS, 'none'] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              className={trackFilter === t ? 'track-tab active' : 'track-tab'}
+              onClick={() => setTrackFilter(t)}
+            >
+              {t === 'all'
+                ? '全部'
+                : t === 'none'
+                  ? '未判断'
+                  : `${OPPORTUNITY_TRACK_LABELS[t]} · ${OPPORTUNITY_TRACK_HINTS[t]}`}
+              <span className="stage-tab-count">{trackCounts[t]}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {showForm && !editing && renderForm()}
 
       {filtered.length === 0 ? (
         <p className="empty">
           {opportunities.length === 0
             ? '收件箱为空。从工作台打开搜索后，把感兴趣的岗位加进来。'
-            : '没有符合筛选条件的机会。'}
+            : stageFilter !== 'all' &&
+                !query &&
+                priorityFilter === 'all' &&
+                !countryFilter
+              ? `「${OPPORTUNITY_STATUS_LABELS[stageFilter]}」中还没有机会。可在其他子收件箱里用“移至”把机会移过来。`
+              : '没有符合筛选条件的机会。'}
         </p>
       ) : (
         <ul className="opp-list">
@@ -689,9 +922,29 @@ export function Inbox({
                     <span className={`priority priority-${priority}`}>
                       {OPPORTUNITY_PRIORITY_LABELS[priority]}
                     </span>
-                    <span className={`status status-${opp.status}`}>
-                      {OPPORTUNITY_STATUS_LABELS[opp.status]}
+                    <span
+                      className={`status status-${opp.status}${
+                        opp.status === 'result' ? ` status-${opp.outcome}` : ''
+                      }`}
+                    >
+                      {moveTargetLabel(moveTargetOf(opp))}
                     </span>
+                    {DDL_STAGES.includes(opp.status) && opp.deadline && (
+                      <span className={`ddl ddl-${ddlLevel(daysUntil(opp.deadline))}`}>
+                        {ddlText(daysUntil(opp.deadline))}
+                      </span>
+                    )}
+                    {opp.track && (
+                      <span
+                        className={`track track-${opp.track}`}
+                        title={OPPORTUNITY_TRACK_HINTS[opp.track]}
+                      >
+                        {OPPORTUNITY_TRACK_LABELS[opp.track]}
+                      </span>
+                    )}
+                    {opp.rpFit?.score != null && (
+                      <span className="rp-fit">RP 契合 {opp.rpFit.score}/10</span>
+                    )}
                   </div>
                   <div className="opp-meta muted small">
                     {opp.country && <span>{opp.country}</span>}
@@ -713,6 +966,9 @@ export function Inbox({
                     </div>
                   )}
                   {opp.note && <p className="small">{opp.note}</p>}
+                  {opp.rpFit?.note && opp.status === 'contact' && (
+                    <p className="small rp-fit-note">{opp.rpFit.note}</p>
+                  )}
                   {opp.aiAnalysis && (
                     <div className="ai-snippet">
                       <p className="small">{opp.aiAnalysis.summary}</p>
@@ -737,6 +993,21 @@ export function Inbox({
                   )}
                 </div>
                 <div className="opp-actions">
+                  <select
+                    className="move-select"
+                    aria-label="移动到"
+                    value={moveTargetOf(opp)}
+                    onChange={(e) => {
+                      const target = e.target.value as MoveTarget
+                      guard(() => moveOpportunity(opp, target))
+                    }}
+                  >
+                    {MOVE_TARGETS.map((t) => (
+                      <option key={t} value={t}>
+                        移至：{moveTargetLabel(t)}
+                      </option>
+                    ))}
+                  </select>
                   <button
                     type="button"
                     className="btn btn-primary"

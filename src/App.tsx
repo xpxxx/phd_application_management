@@ -1,10 +1,10 @@
 import { useMemo, useRef, useState } from 'react'
-import { sources as builtinSources } from './data/sources'
 import { skills as builtinSkills } from './data/skills'
 import { Inbox } from './components/Inbox'
 import { SettingsPanel } from './components/SettingsPanel'
 import { Workbench } from './components/Workbench'
 import { useLocalState } from './hooks/useLocalState'
+import { effectiveSources } from './lib/storage'
 import type { Opportunity } from './types'
 import './App.css'
 
@@ -26,6 +26,8 @@ export default function App() {
     saveSettings,
     downloadExport,
     importFromFile,
+    downloadSourcesExport,
+    importSourcesFromFile,
   } = useLocalState()
 
   const [tab, setTab] = useState<Tab>('workbench')
@@ -54,15 +56,7 @@ export default function App() {
     ]
   }, [state.customSkills])
 
-  const allSources = useMemo(() => {
-    const builtinIds = new Set(builtinSources.map((s) => s.id))
-    return [
-      ...builtinSources.map(
-        (b) => state.customSources.find((c) => c.id === b.id) ?? b,
-      ),
-      ...state.customSources.filter((c) => !builtinIds.has(c.id)),
-    ]
-  }, [state.customSources])
+  const allSources = useMemo(() => effectiveSources(state), [state])
 
   const skillId = selectedSkillId || allSkills[0]?.id || ''
   const skillExtras = state.skillSourceExtras[skillId] ?? []
@@ -136,6 +130,8 @@ export default function App() {
             onDeleteSource={deleteSource}
             onResetSource={resetSource}
             onPinSource={(sourceId) => pinSourceToSkill(skillId, sourceId)}
+            onExportSources={downloadSourcesExport}
+            onImportSources={importSourcesFromFile}
             llm={state.settings.llm}
             onOpenSettings={() => setTab('settings')}
           />

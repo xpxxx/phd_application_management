@@ -5,13 +5,16 @@ import {
   clearSkillSourceExtras,
   detachSourceFromSkill,
   exportLocalState,
+  exportSourceCatalog,
   loadLocalState,
+  mergeImportedSources,
   parseImportJson,
   removeCustomSkill,
   removeCustomSource,
   removeOpportunity,
   removeSourceOverride,
   saveCustomSkill,
+  type SourceImportSummary,
   saveLocalState,
   setScanSession,
   toggleScannedSource,
@@ -19,6 +22,18 @@ import {
   upsertCustomSource,
   upsertOpportunity,
 } from '../lib/storage'
+
+function downloadJson(json: string, fileName: string) {
+  const blob = new Blob([json], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = fileName
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+const today = () => new Date().toISOString().slice(0, 10)
 
 export function useLocalState() {
   const [state, setState] = useState<LocalState>(() => loadLocalState())
@@ -105,16 +120,22 @@ export function useLocalState() {
   }, [])
 
   const downloadExport = useCallback(() => {
-    const blob = new Blob([exportLocalState(state)], {
-      type: 'application/json',
-    })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `phd-inbox-export-${new Date().toISOString().slice(0, 10)}.json`
-    a.click()
-    URL.revokeObjectURL(url)
+    downloadJson(exportLocalState(state), `phd-inbox-export-${today()}.json`)
   }, [state])
+
+  const downloadSourcesExport = useCallback(() => {
+    downloadJson(exportSourceCatalog(state), `phd-sources-${today()}.json`)
+  }, [state])
+
+  const importSourcesFromFile = useCallback(
+    async (file: File): Promise<SourceImportSummary> => {
+      const text = await file.text()
+      const { state: next, summary } = mergeImportedSources(state, text)
+      setState(next)
+      return summary
+    },
+    [state],
+  )
 
   const importFromFile = useCallback(async (file: File) => {
     const text = await file.text()
@@ -150,5 +171,7 @@ export function useLocalState() {
     replaceState,
     downloadExport,
     importFromFile,
+    downloadSourcesExport,
+    importSourcesFromFile,
   }
 }

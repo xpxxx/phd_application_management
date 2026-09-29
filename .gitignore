@@ -25,6 +25,7 @@ dist-ssr
 
 # Private exports — never commit personal inbox data
 inbox-export*.json
+phd-inbox-export*.json
 *-private.json
 .env
 .env.*
